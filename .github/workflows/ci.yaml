@@ -1,119 +1,126 @@
-# .github/workflows/ci.yml
-name: IRIS DVC + MLflow CI
+name: Continuous Deployment to GKE
 
 on:
   push:
     branches:
       - main
-      - dev
+      - deploy
   pull_request:
     branches:
       - main
-      - dev
+      - deploy
+
+env:
+  PROJECT_ID: week-1-474208
+  GKE_CLUSTER: iris-mlops-cluster
+  GKE_ZONE: us-central1-c
+  IMAGE_NAME: iris-fastapi-api
+  GAR_LOCATION: us-central1
+  GAR_REPO: mlops-repository
 
 jobs:
-  test_and_report:
+  # ------------------------------------------------------------------
+  # JOB 1: Continuous Integration & Reporting
+  # ------------------------------------------------------------------
+  ci-tests:
     runs-on: ubuntu-latest
-    
-    # REQUIRED: Grant token permissions for CML to post the PR comment
+
     permissions:
       contents: write
       pull-requests: write
-      
+
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      
-      # ----------------------------------------------------
-      # 1. SETUP CORE ENVIRONMENT & AUTH
-      # ----------------------------------------------------
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install dependencies (DVC, MLflow, Pytest)
+      - name: Install dependencies
         run: |
           sudo apt-get update
-          # Use -s flag to capture output from Python prints (useful for debugging)
           pip install -r requirements.txt
-          
-      - name: Set Google Cloud Credentials (For DVC Data Pull)
-        uses: google-github-actions/auth@v2
-        with:
-          # This secret allows the runner to access the GCS bucket for DVC
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
-
-      # ----------------------------------------------------
-      # 2. DVC DATA PULL
-      # ----------------------------------------------------
-      - name: Configure DVC for GCS Remote
-        run: |
-          dvc remote add -d gcs_bucket gs://week-2-mlops-bucket/dvc_remote --force
-          dvc config core.no_scm true
 
       - name: Set Google Cloud Credentials
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
 
-      - name: DVC Pull Data and Model
+      - name: DVC Pull Data
         run: |
-          # Use --force to prevent issues with files generated/left over by the runner
+          dvc remote add -d gcs_bucket gs://week-2-mlops-bucket/dvc_remote --force
+          dvc config core.no_scm true
           dvc pull data/V3_augmented.csv.dvc --force
-          
-      - name: Set MLflow Tracking URI and Authenticate
-        env:
-            # 1. Set the Tracking URI to point to the local metadata
-            MLFLOW_TRACKING_URI: 'file://${{ github.workspace }}/mlruns' 
 
-            # 2. CRITICAL: Pass the GCS Artifact URI so MLflow knows how to resolve the model payload
-            MLFLOW_GCS_ARTIFACT_URI: 'gs://week-2-mlflow-artifacts-bucket/iris_artifacts'
-          
-        run: |
-            # This export isn't always strictly needed but reinforces the artifact location
-            export MLFLOW_TRACKING_URI="${{ env.MLFLOW_TRACKING_URI }}"
-
-            # You must also inform MLflow of the GCS artifact location.
-            # While artifact_location is set during tracking, explicitly setting it as an
-            # environment variable can sometimes resolve ambiguity in different MLflow versions.
-            echo "MLFLOW_ARTIFACT_LOCATION=${{ env.MLFLOW_GCS_ARTIFACT_URI }}" >> $GITHUB_ENV
-
-            echo "MLflow tracking set up. Model artifacts will be retrieved from GCS."
-
-
-
-      # ----------------------------------------------------
-      # 3. TESTING
-      # ----------------------------------------------------
       - name: Run Pytest Validation and Evaluation Tests
-        # The test script fetches the model from the MLflow Registry using the URI set above.
-        run: pytest tests/test_pipeline.py -s
+        run: pytest tests/test_pipeline.py
 
-      # ----------------------------------------------------
-      # 4. CML SETUP AND REPORTING
-      # ----------------------------------------------------
       - name: Setup CML 🛠️
         uses: iterative/setup-cml@v2
-        
+
       - name: Create CML Sanity Report
         if: github.event_name == 'pull_request'
         env:
           REPO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "## CI/CD Pipeline Status Report 🤖" > report.md
-          echo "" >> report.md
-          echo "### Data and Model DVC/MLflow Status" >> report.md
-          echo "- **Input Data (DVC):** \`data/V3_augmented.csv\` (Pulled from GCS)" >> report.md
-          echo "- **Model (MLflow):** Latest registered model fetched from Registry." >> report.md
-          echo "" >> report.md
-          echo "### Test Results (pytest)" >> report.md
-          echo "- **Data Validation:** ✅ Passed" >> report.md
-          echo "- **Model Sanity Check:** ✅ Passed" >> report.md
-          echo "" >> report.md
-          echo "CI pipeline successfully verified data via DVC and model via MLflow Registry." >> report.md
-          
-          # Use the CML command to post the report as a comment on the Pull Request
+          echo "## CI Pipeline Status: PASSED ✅" > report.md
+          echo "CI tests passed. Deployment eligible upon merge." >> report.md
           cml comment create report.md
+
+  # ------------------------------------------------------------------
+  # JOB 2: Continuous Deployment (Build, Push, Deploy to GKE)
+  # ------------------------------------------------------------------
+  build-and-deploy:
+    if: github.event_name == 'push' && success()
+    runs-on: ubuntu-latest
+    needs: [ci-tests]
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      # ✅ Define IMAGE_URL dynamically
+      - name: Set IMAGE_URL
+        run: |
+          echo "IMAGE_URL=${GAR_LOCATION}-docker.pkg.dev/${PROJECT_ID}/${GAR_REPO}/${IMAGE_NAME}" >> $GITHUB_ENV
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${GAR_LOCATION}-docker.pkg.dev --quiet
+
+      - name: Build and Push Docker Image
+        run: |
+          IMAGE_TAG=${{ github.sha }}
+          docker build -t ${IMAGE_URL}:${IMAGE_TAG} .
+          docker push ${IMAGE_URL}:${IMAGE_TAG}
+
+      - name: Get GKE Credentials
+        uses: google-github-actions/get-gke-credentials@v2
+        with:
+          cluster_name: ${{ env.GKE_CLUSTER }}
+          location: ${{ env.GKE_ZONE }}
+
+      - name: Deploy to GKE (Using Standard Shell)
+        run: |
+         IMAGE_TAG=${{ github.sha }}
+         IMAGE_PATH=${{ env.IMAGE_URL }}:${IMAGE_TAG}
+
+         
+
+         echo "Deploying image: ${IMAGE_PATH} to GKE..."
+         # Create deployment if not exists
+         kubectl apply -f deployment.yaml
+
+          # Update image in existing deployment
+         kubectl set image deployment/iris-api-deployment iris-api=${IMAGE_PATH}
+         kubectl rollout status deployment/iris-api-deployment --timeout=5m
+         
+         kubectl apply -f service.yaml
