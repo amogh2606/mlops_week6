@@ -11,18 +11,6 @@ from hyperopt import fmin, tpe, hp, STATUS_OK, Trials
 import numpy as np
 import sys
 
-MLFLOW_ARTIFACT_URI = "gs://week-2-mlflow-artifacts-bucket/iris_artifacts" 
-
-# --- Step 2: Main Training and Optimization Loop ---
-def run_hyperparameter_tuning(local_data_path):
-    
-    # 1. SET EXPERIMENT (and automatically set its artifact location)
-    # The artifact_location parameter sets the root directory for all model payloads
-    mlflow.set_experiment(
-        experiment_name="IRIS_Classifier_Hyperopt",
-        artifact_location=MLFLOW_ARTIFACT_URI
-    )
-
 # --- Configuration (Model Output Paths are now mostly ignored/removed) ---
 # NOTE: DVC should only track data and DVC pipeline definitions (dvc.yaml), not models.
 
