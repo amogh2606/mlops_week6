@@ -1,0 +1,8 @@
+numpy
+pandas
+scikit-learn
+dvc[gs]
+joblib
+pytest
+mlflow
+fastapi

@@ -1,0 +1,4 @@
+Training version: V1_RUN
+Execution time: 20251019_064322
+Model accuracy: 0.951
+Data Source: data/V1_data.csv
